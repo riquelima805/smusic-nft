@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "WooSDK Wallet",
+  "version": "1.0.0",
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "src/background/background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/content/content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "permissions": ["storage", "activeTab", "scripting"]
+}
