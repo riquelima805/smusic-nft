@@ -1,11 +1,4 @@
-/**
- * SolanaPriceService.ts
- * 
- * Busca preço atual SOL/USD e converte valores
- * - Fallback para múltiplas APIs
- * - Cache com TTL
- * - Conversão SOL ↔ USD ↔ Lamports
- */
+
 
 interface PriceData {
   solUsd: number;
@@ -14,11 +7,8 @@ interface PriceData {
   source: string;
 }
 
-const CACHE_TTL = 5 * 60_000; // 5 minutos
+const CACHE_TTL = 5 * 60_000;
 
-/**
- * Estratégias de fetch, em ordem de preferência
- */
 const PRICE_SOURCES = [
   {
     name: 'CoinGecko',
@@ -47,7 +37,7 @@ const PRICE_SOURCES = [
         }
       );
       const data = await res.json();
-      // Pyth retorna em formato diferente, extrra o price
+    
       if (data.result?.price) return data.result.price;
       throw new Error('Pyth format mismatch');
     },
@@ -74,11 +64,11 @@ class SolanaPriceService {
   async fetchPrice(): Promise<PriceData> {
     // Check cache
     if (this.cache && Date.now() - this.cache.fetchedAt < CACHE_TTL) {
-      console.log(`💰 Usando preço em cache: $${this.cache.solUsd}`);
+      console.log(` Usando preço em cache: $${this.cache.solUsd}`);
       return this.cache;
     }
 
-    console.log('🔄 Buscando preço SOL/USD...');
+    console.log(' Buscando preço SOL/USD...');
 
     for (const source of PRICE_SOURCES) {
       try {
@@ -95,13 +85,13 @@ class SolanaPriceService {
           return priceData;
         }
       } catch (error) {
-        console.warn(`❌ ${source.name} falhou:`, error);
+        console.warn(` ${source.name} falhou:`, error);
         continue;
       }
     }
 
-    // Fallback: se tudo falhar, use preço default (cuidado!)
-    console.error('⚠️  Todas as APIs falharam, usando fallback $150');
+    
+    console.error('  Todas as APIs falharam, usando fallback $75');
     const fallback: PriceData = {
       solUsd: 150, // Preço default
       usdSol: 1 / 150,
@@ -112,56 +102,42 @@ class SolanaPriceService {
     return fallback;
   }
 
-  /**
-   * Converte SOL para USD
-   */
+  
   async solToUsd(sol: number): Promise<number> {
     const price = await this.fetchPrice();
     return sol * price.solUsd;
   }
 
-  /**
-   * Converte USD para SOL
-   */
+ 
   async usdToSol(usd: number): Promise<number> {
     const price = await this.fetchPrice();
     return usd * price.usdSol;
   }
 
-  /**
-   * Converte lamports para USD
-   */
+
   async lamportsToUsd(lamports: number): Promise<number> {
     const sol = lamports / 1_000_000_000;
     return this.solToUsd(sol);
   }
 
-  /**
-   * Converte USD para lamports
-   */
+ 
   async usdToLamports(usd: number): Promise<number> {
     const sol = await this.usdToSol(usd);
     return sol * 1_000_000_000;
   }
 
-  /**
-   * Preço atual em cache (sem fetch)
-   */
+  
   getLastPrice(): number | null {
     return this.cache?.solUsd ?? null;
   }
 
-  /**
-   * Força refresh do cache
-   */
+  
   clearCache() {
     this.cache = null;
-    console.log('🧹 Cache de preço limpo');
+    console.log(' Cache de preço limpo');
   }
 
-  /**
-   * Formata SOL em USD formatado
-   */
+ 
   async formatSolAsUsd(sol: number, decimals = 2): Promise<string> {
     const usd = await this.solToUsd(sol);
     return usd.toLocaleString('en-US', {
@@ -172,9 +148,7 @@ class SolanaPriceService {
     });
   }
 
-  /**
-   * Formata lamports em USD formatado
-   */
+  
   async formatLamportsAsUsd(
     lamports: number,
     decimals = 2
