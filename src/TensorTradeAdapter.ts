@@ -1,25 +1,4 @@
-/**
- * TensorTradeAdapter.ts  (na prática: "AdlaMarketOnChainAdapter")
- *
- * Mantém o MESMO nome de arquivo e os MESMOS exports (TensorNFT,
- * TensorListing, TensorActivity, TensorTradeAdapter, tensorAdapter) só pra
- * `useTensorMarket.ts` continuar funcionando sem precisar mudar o import.
- *
- * Mas agora NÃO fala mais com Magic Eden/Tensor Trade. Lê DIRETO do seu
- * programa Anchor `adla_market` na devnet via `getProgramAccounts` — só os
- * NFTs que vocês mesmos listaram com `adla_nftList` aparecem aqui.
- *
- * Requisito: `npm install @solana/web3.js` (lib oficial da Solana, cuida de
- * PDA, base58, RPC — evita reinventar tudo isso em TS puro).
- *
- * ⚠️ IMPORTANTE — DECIMAIS DO PREÇO:
- * Antes (Tensor/Magic Eden) o preço vinha em "lamports" de SOL (9 casas
- * decimais). AGORA o preço vem em menor unidade do `payment_mint`
- * (USDC devnet = 6 casas decimais, não 9!). Isso afeta qualquer lugar do
- * App.tsx que faz `/ 1_000_000_000` pra mostrar o preço (ex: `priceLamports`,
- * `formatUsdEstimate`, e o `SolanaPriceService` que assume SOL). Ver aviso
- * completo no final deste arquivo.
- */
+
 
 import {
   Connection,
@@ -27,9 +6,7 @@ import {
   clusterApiUrl,
 } from '@solana/web3.js';
 
-// ============================================================================
-// TIPOS (mantidos pra compatibilidade com useTensorMarket.ts)
-// ============================================================================
+
 
 export interface TensorNFT {
   mint: string;
@@ -38,7 +15,7 @@ export interface TensorNFT {
   image?: string;
   listed: boolean;
   lastSalePrice?: number;
-  listedPrice?: number; // menor unidade do payment_mint (NÃO é mais lamports de SOL)
+  listedPrice?: number; 
   owner?: string;
   attributes?: Record<string, string>;
   rarityRank?: number;
@@ -47,7 +24,7 @@ export interface TensorNFT {
 export interface TensorListing {
   mint: string;
   seller: string;
-  price: number; // menor unidade do payment_mint
+  price: number; 
   pdaAddress: string;
   rarity?: number;
   expireAt?: number;
@@ -61,43 +38,36 @@ export interface TensorActivity {
   tx: string;
 }
 
-// ============================================================================
-// CONFIGURAÇÃO — bater 1:1 com AdlaAnchorClient.kt
-// ============================================================================
+
+
 
 export const ADLA_PROGRAM_ID = new PublicKey('2xaB1ZpMHpK1h44W7ogHtU3cng5bKtzfg6DHQMF9ELj2');
 
-/** TODO: trocar quando o token $ADLA existir de verdade (ver AdlaAnchorClient.kt). */
-export const PAYMENT_MINT = new PublicKey('4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU'); // USDC devnet
-export const PAYMENT_MINT_DECIMALS = 6; // USDC = 6 casas. Trocar se o payment_mint mudar.
 
-const RPC_URL = clusterApiUrl('devnet'); // ou 'https://api.devnet.solana.com' direto
+export const PAYMENT_MINT = new PublicKey('4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU');
+export const PAYMENT_MINT_DECIMALS = 6;
+
+const RPC_URL = clusterApiUrl('devnet'); 
 const METADATA_PROGRAM_ID = new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s');
 
-/** Tamanho exato da struct Listing on-chain: 8 (disc) + 32 + 32 + 8 + 1 + 1 = 82 bytes. */
+
 const LISTING_ACCOUNT_SIZE = 82;
 
 interface CacheEntry<T> {
   data: T;
   expiresAt: number;
 }
-const CACHE_TTL = 60_000; // 1 min
-
-// ============================================================================
-// HELPERS DE PARSE
-// ============================================================================
-
-/** Lê um u64 little-endian de um Buffer/Uint8Array a partir de um offset. */
+const CACHE_TTL = 60_000; 
 function readU64LE(data: Uint8Array, offset: number): number {
   let value = 0n;
   for (let i = 7; i >= 0; i--) {
     value = (value << 8n) | BigInt(data[offset + i]);
   }
-  // NFTs/preços em contexto de UI cabem tranquilo em Number (< 2^53)
+  
   return Number(value);
 }
 
-/** Decodifica a struct Listing (ver `#[account] pub struct Listing` no lib.rs). */
+
 function decodeListing(pubkey: PublicKey, data: Uint8Array): TensorListing | null {
   if (data.length < LISTING_ACCOUNT_SIZE) return null;
 
@@ -106,7 +76,7 @@ function decodeListing(pubkey: PublicKey, data: Uint8Array): TensorListing | nul
   const price = readU64LE(data, 72);
   const active = data[80] === 1;
 
-  if (!active) return null; // só mostra listagens ativas
+  if (!active) return null; 
 
   return {
     mint: nftMint,
@@ -116,7 +86,6 @@ function decodeListing(pubkey: PublicKey, data: Uint8Array): TensorListing | nul
   };
 }
 
-/** Parse simplificado do Metaplex Token Metadata (nome/símbolo/uri só, sem creators/collection). */
 async function fetchMetaplexMetadata(
   connection: Connection,
   mint: PublicKey
@@ -130,14 +99,14 @@ async function fetchMetaplexMetadata(
     if (!accountInfo) return null;
 
     const data = accountInfo.data;
-    // Layout: key(1) + updateAuthority(32) + mint(32) + name(4+32) + symbol(4+10) + uri(4+200) + ...
+    
     let offset = 1 + 32 + 32;
 
     const readBorshString = (fixedFieldLen: number): string => {
       const strLen = new DataView(data.buffer, data.byteOffset + offset, 4).getUint32(0, true);
       offset += 4;
       const bytes = data.slice(offset, offset + strLen);
-      offset += fixedFieldLen; // campo tem tamanho fixo reservado (32/10/200), independente do strLen real
+      offset += fixedFieldLen; 
       return Buffer.from(bytes).toString('utf8').replace(/\0/g, '').trim();
     };
 
@@ -152,7 +121,7 @@ async function fetchMetaplexMetadata(
   }
 }
 
-/** Busca a imagem no JSON apontado pela URI do metadata (se existir e for acessível). */
+
 async function fetchImageFromUri(uri: string): Promise<string | undefined> {
   if (!uri) return undefined;
   try {
@@ -165,9 +134,7 @@ async function fetchImageFromUri(uri: string): Promise<string | undefined> {
   }
 }
 
-// ============================================================================
-// ADAPTER
-// ============================================================================
+
 
 export class TensorTradeAdapter {
   private cache = new Map<string, CacheEntry<any>>();
@@ -175,22 +142,18 @@ export class TensorTradeAdapter {
 
   constructor() {}
 
-  /**
-   * Busca TODAS as listagens ativas do programa `adla_market` na devnet.
-   * Usa `getProgramAccounts` com filtro de tamanho (mais barato que trazer
-   * tudo e filtrar client-side).
-   */
+ 
   async fetchListings(): Promise<TensorNFT[]> {
     const cacheKey = 'listings_adla_market';
 
     const cached = this.cache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
-      console.log('📦 Usando cache de listagens (on-chain)');
+      console.log(' Usando cache de listagens (on-chain)');
       return cached.data;
     }
 
     try {
-      console.log('🔍 Buscando Listings on-chain no programa adla_market (devnet)...');
+      console.log(' Buscando Listings on-chain no programa adla_market (devnet)...');
 
       const accounts = await this.connection.getProgramAccounts(ADLA_PROGRAM_ID, {
         filters: [{ dataSize: LISTING_ACCOUNT_SIZE }],
@@ -204,7 +167,7 @@ export class TensorTradeAdapter {
 
       console.log(`✓ ${listings.length} listagens ATIVAS`);
 
-      // Enriquece com metadata (nome + imagem) — em paralelo, best-effort
+     
       const nfts: TensorNFT[] = await Promise.all(
         listings.map(async (listing) => {
           const mintPk = new PublicKey(listing.mint);
@@ -226,12 +189,12 @@ export class TensorTradeAdapter {
       this.cache.set(cacheKey, { data: nfts, expiresAt: Date.now() + CACHE_TTL });
       return nfts;
     } catch (error) {
-      console.error('❌ Falha ao buscar listagens on-chain:', error);
+      console.error(' Falha ao buscar listagens on-chain:', error);
       return [];
     }
   }
 
-  /** Busca um NFT específico (lê Metaplex metadata; não indica se está listado). */
+
   async fetchNFT(mint: string): Promise<TensorNFT | null> {
     const cacheKey = 'nft_' + mint;
     const cached = this.cache.get(cacheKey);
@@ -259,18 +222,10 @@ export class TensorTradeAdapter {
     }
   }
 
-  /**
-   * Atividade recente. SEM indexador próprio, isso exigiria varrer
-   * `getSignaturesForAddress` do programa + decodificar cada instrução —
-   * caro e lento de fazer client-side. Por enquanto retorna vazio; o
-   * `activity` do App.tsx já é populado localmente pelas próprias ações do
-   * usuário (`pushActivity`), então isso não bloqueia nada.
-   */
   async fetchActivity(_limit = 50): Promise<TensorActivity[]> {
     return [];
   }
 
-  /** Stats calculadas a partir das listagens já carregadas (sem histórico de volume). */
   async fetchStats(): Promise<{
     floorPrice: number;
     volume24h: number;
@@ -301,20 +256,6 @@ export class TensorTradeAdapter {
     return { mint, amount };
   }
 
-  /**
-   * Saldo real de USDC (payment_mint) da carteira conectada, direto da chain —
-   * sem precisar de método novo no bridge nativo (Kotlin), porque isso é
-   * leitura pública de conta via RPC, não uma transação assinada.
-   *
-   * Usa `getParsedTokenAccountsByOwner` filtrando pelo `PAYMENT_MINT`, e soma
-   * `uiAmount` de todas as token accounts encontradas (normalmente só uma, o
-   * Associated Token Account — mas soma todas por segurança, caso existam
-   * contas "órfãs" antigas do mesmo mint).
-   *
-   * Retorna `{ raw, decimal }`: `raw` = menor unidade (6 casas, útil se for
-   * comparar/somar com preços vindos do adapter), `decimal` = valor "de tela"
-   * já pronto pra `formatUsdc()`.
-   */
   async fetchUsdcBalance(ownerAddress: string): Promise<{ raw: number; decimal: number }> {
     const cacheKey = 'usdc_balance_' + ownerAddress;
     const cached = this.cache.get(cacheKey);
@@ -337,22 +278,21 @@ export class TensorTradeAdapter {
         raw: TensorTradeAdapter.decimalToRaw(decimal),
       };
 
-      // cache curto (15s): saldo muda com mais frequência que listagens, mas
-      // ainda vale evitar bater no RPC a cada render/poll.
+     
       this.cache.set(cacheKey, { data: result, expiresAt: Date.now() + 15_000 });
       return result;
     } catch (error) {
-      console.error(`❌ Falha ao buscar saldo USDC de ${ownerAddress}:`, error);
+      console.error(` Falha ao buscar saldo USDC de ${ownerAddress}:`, error);
       return { raw: 0, decimal: 0 };
     }
   }
 
   clearCache() {
     this.cache.clear();
-    console.log('🧹 Cache do adapter on-chain limpo');
+    console.log(' Cache do adapter on-chain limpo');
   }
 
-  /** Converte menor unidade do payment_mint pra unidade "inteira" (ex: micro-USDC -> USDC). */
+ 
   static rawToDecimal(raw: number): number {
     return raw / Math.pow(10, PAYMENT_MINT_DECIMALS);
   }
@@ -364,24 +304,3 @@ export class TensorTradeAdapter {
 
 export const tensorAdapter = new TensorTradeAdapter();
 
-/* ============================================================================
-   ⚠️ AVISO — AJUSTE NECESSÁRIO NO RESTO DO App.tsx (decimais)
-   ----------------------------------------------------------------------------
-   O preço agora vem em MENOR UNIDADE DE USDC (6 casas), não em lamports de
-   SOL (9 casas). Todo lugar do App.tsx / SolanaPriceService.ts que faz:
-
-       price / 1_000_000_000        (assume SOL)
-
-   deveria, pros itens vindos DESTE adapter, usar:
-
-       TensorTradeAdapter.rawToDecimal(price)     // = price / 1_000_000
-
-   Isso afeta principalmente:
-     - `priceLamports` / `formatUsdEstimate()` no App.tsx (hoje assume SOL)
-     - `SolanaPriceService.lamportsToUsd()` (também assume SOL/lamports)
-
-   Como USDC já É dólar (1 USDC ≈ 1 USD), o mais simples pode ser: pra itens
-   vindos do `adla_market`, NEM usar SolanaPriceService (que converte
-   SOL→USD) — já é USD direto, só formatar com `rawToDecimal()` e exibir
-   como "$ X.XX". Se quiser, eu já ajusto essa parte do App.tsx também.
-   ========================================================================== */
