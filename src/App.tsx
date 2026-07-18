@@ -2,7 +2,8 @@ import React, { useState, useEffect, useCallback, useMemo, useRef, createContext
 import './App.css';
 // Integração de preço SOL/USD — mesmo serviço usado no teste (Apptestpegou/useTensorMarket).
 // Ajuste o caminho abaixo conforme onde você colocar o arquivo no seu projeto.
-import { useSolanaPrice } from './useTensorMarket';
+import { useSolanaPrice, useTensorMarket, useUsdcBalance } from './useTensorMarket';
+import type { TensorMarketItem } from './useTensorMarket';
 // Preço agora vem em menor unidade de USDC (6 casas), via TensorTradeAdapter.rawToDecimal.
 // Ajuste o caminho abaixo conforme onde você colocar TensorTradeAdapter.ts no seu projeto.
 import { TensorTradeAdapter } from './TensorTradeAdapter';
@@ -89,7 +90,13 @@ function useAdlaProvider(): AdlaWalletProvider | null {
   return provider;
 }
 
-/** Chama o provider real quando existir; cai pro mock local em Modo Demo. */
+/**
+ * Chama o provider real quando existir; cai pro mock local em Modo Demo.
+ * IMPORTANTE: mesmo no caminho real, chamamos `applyMock()` (update otimista de UI)
+ * depois que a chamada ao provider resolve com sucesso — porque `TensorTradeAdapter`
+ * ainda não tem indexador de atividade (fetchActivity() retorna sempre vazio), então
+ * sem isso a tela ficaria "travada" no estado antigo mesmo após uma compra real confirmar.
+ */
 async function callBridge<T>(
   provider: AdlaWalletProvider | null,
   demoMode: boolean,
@@ -98,7 +105,9 @@ async function callBridge<T>(
   applyMock: () => void
 ): Promise<T> {
   if (provider) {
-    return provider.request<T>({ method, params });
+    const result = await provider.request<T>({ method, params });
+    applyMock();
+    return result;
   }
   if (demoMode) {
     await new Promise(r => setTimeout(r, 600 + Math.random() * 500));
@@ -318,6 +327,36 @@ function buildCatalogFromAlbums(albums: AlbumData[]): NftItem[] {
 
 function genCatalog(): NftItem[] {
   return buildCatalogFromAlbums(ALBUMS_DATA);
+}
+
+/**
+ * Converte um item vindo do on-chain (useTensorMarket) pro formato NftItem da UI.
+ * Só temos mint/nome/imagem/preço/vendedor reais — rarity, tags, likes, "featured"
+ * etc. ainda não existem on-chain, então entram com valor neutro/zerado.
+ *
+ * ⚠️ `owned` fica sempre `false` aqui: pra saber de verdade se A CARTEIRA CONECTADA
+ * é dona do NFT, precisaria consultar os token accounts dela (getTokenAccountsByOwner
+ * pro mint em questão) — isso ainda não existe no TensorTradeAdapter. Por enquanto,
+ * a aba "Coleção" fica vazia pra carteira real até essa consulta ser implementada.
+ */
+function mapOnChainItem(t: TensorMarketItem, connectedAddress: string): NftItem {
+  return {
+    id: t.tensorMint,
+    mint: t.tensorMint,
+    title: t.tensorName,
+    category: 'card',
+    rarity: 'COMUM',
+    tags: [],
+    price: TensorTradeAdapter.rawToDecimal(t.tensorPrice),
+    priceRaw: t.tensorPrice,
+    listingMode: 'buy',
+    likes: 0,
+    liked: false,
+    owned: false, // TODO: comparar token accounts da carteira conectada com o mint
+    forSale: t.tensorListed && t.tensorSeller === connectedAddress,
+    featured: false,
+    imageUrl: t.tensorImage,
+  };
 }
 
 function genIncomingOffers(): IncomingOffer[] {
@@ -1124,12 +1163,19 @@ const App: React.FC = () => {
   // Preço SOL/USD real (CoinGecko/Pyth/Birdeye, com cache) — só pra mostrar a
   // estimativa em USD ao lado do preço em USDC. Ainda não afeta o saldo/compra.
   const { price: solUsdPrice } = useSolanaPrice();
+  // Listagens reais on-chain (programa adla_market). Só usadas quando NÃO estiver
+  // em Modo Demo — em Modo Demo o catálogo continua sendo o mock local (genCatalog).
+  const onChainMarket = useTensorMarket();
   const demoAutoSetRef = useRef(false);
 
   const [address, setAddress] = useState('');
   const [connecting, setConnecting] = useState(false);
-  const [demoMode, setDemoMode] = useState<boolean>(() => !(typeof window !== 'undefined' && window.adlaWallet));
+  const [demoMode, setDemoMode] = useState<boolean>(false);
   const [showInstallHint, setShowInstallHint] = useState(false);
+
+  // Saldo real de USDC da carteira conectada (direto da chain via getParsedTokenAccountsByOwner).
+  // Só busca quando tem endereço real (fica 0 sem endereço, sem precisar checar demoMode aqui).
+  const realUsdcBalance = useUsdcBalance(!demoMode && address ? address : null);
 
   const [activeView, setActiveView] = useState<ViewKey>('home');
   const [status, setStatus] = useState<{ msg: string; type: 'ok' | 'err' | 'loading' } | null>(null);
@@ -1137,15 +1183,53 @@ const App: React.FC = () => {
   const toastTimer = useRef<number | null>(null);
 
   const [items, setItems] = useState<NftItem[]>(() => genCatalog());
-  const [incomingOffers, setIncomingOffers] = useState<IncomingOffer[]>(() =>
-    genIncomingOffers().map(o => ({ ...o, mint: items.find(i => i.id === o.itemId)?.mint ?? o.mint }))
-  );
-  const [activity, setActivity] = useState<ActivityItem[]>(() => genActivity());
-  const [adlaBalance, setAdlaBalance] = useState(15400);
+  const [incomingOffers, setIncomingOffers] = useState<IncomingOffer[]>([]);
+  const [activity, setActivity] = useState<ActivityItem[]>([]);
+  const [adlaBalance, setAdlaBalance] = useState(0);
 
   const [soldCount, setSoldCount] = useState(0);
-  const [sentOffersCount, setSentOffersCount] = useState(1);
-  const [volume, setVolume] = useState(1200);
+  const [sentOffersCount, setSentOffersCount] = useState(0);
+  const [volume, setVolume] = useState(0);
+
+  /**
+   * Fonte de dados muda conforme o modo:
+   *  - Modo Demo ligado           → catálogo/ofertas/atividade/saldo MOCK (só ilustrativo).
+   *  - Carteira real conectada    → catálogo vem do on-chain (adla_market); saldo vem do
+   *                                  saldo real de USDC (realUsdcBalance); ofertas/atividade
+   *                                  ficam vazias até existir indexador real (ver TODO).
+   *  - Nada conectado ainda       → mostra o catálogo mock só pra não abrir tela vazia,
+   *                                  mas SEM saldo/atividade fake (nada foi "conectado").
+   */
+  useEffect(() => {
+    if (demoMode) {
+      setItems(genCatalog());
+      setIncomingOffers(genIncomingOffers().map(o => ({ ...o, mint: genCatalog().find(i => i.id === o.itemId)?.mint ?? o.mint })));
+      setActivity(genActivity());
+      setAdlaBalance(15400);
+      setSoldCount(0);
+      setSentOffersCount(1);
+      setVolume(1200);
+      return;
+    }
+
+    if (provider && address) {
+      // Carteira real conectada: usa listagens on-chain e saldo real de USDC.
+      setItems(onChainMarket.items.map(t => mapOnChainItem(t, address)));
+      setIncomingOffers([]);
+      setActivity([]);
+      setAdlaBalance(realUsdcBalance.balance); // TODO: ofertas/atividade reais ainda dependem de indexador
+      setSoldCount(0);
+      setSentOffersCount(0);
+      setVolume(0);
+      return;
+    }
+
+    // Nem demo, nem carteira conectada ainda: só o catálogo (visualização), sem dados de conta.
+    setItems(genCatalog());
+    setIncomingOffers([]);
+    setActivity([]);
+    setAdlaBalance(0);
+  }, [demoMode, provider, address, onChainMarket.items, realUsdcBalance.balance]);
 
   const [marketTab, setMarketTab] = useState<MarketTab>('colecionaveis');
   const [search, setSearch] = useState('');
@@ -1190,8 +1274,23 @@ const App: React.FC = () => {
     setActivity(prev => [{ ...item, id: randomId(), ts: Date.now() }, ...prev].slice(0, 30));
   }, []);
 
+  /** Espera até `timeoutMs` pelo `window.adlaWallet` aparecer (o bridge nativo injeta
+   *  o script de forma assíncrona, então pode não estar pronto no exato instante do clique). */
+  const waitForProvider = useCallback(async (timeoutMs = 3000): Promise<AdlaWalletProvider | null> => {
+    if (provider) return provider;
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (typeof window !== 'undefined' && window.adlaWallet) return window.adlaWallet;
+      await new Promise(r => setTimeout(r, 150));
+    }
+    return null;
+  }, [provider]);
+
   const connect = useCallback(async () => {
-    if (!provider) {
+    setConnecting(true);
+    const activeProvider = await waitForProvider();
+    if (!activeProvider) {
+      setConnecting(false);
       if (demoMode) {
         setAddress(genDemoAddress());
         setMsg('Conectado em modo demo ✓');
@@ -1200,10 +1299,9 @@ const App: React.FC = () => {
       }
       return;
     }
-    setConnecting(true);
     setMsg('Aguardando aprovação na carteira…', 'loading');
     try {
-      const accounts = await provider.request<string[]>({ method: 'sol_requestAccounts' });
+      const accounts = await activeProvider.request<string[]>({ method: 'sol_requestAccounts' });
       setAddress(accounts?.[0] ?? '');
       setMsg('Carteira conectada ✓');
     } catch (e: any) {
@@ -1211,7 +1309,7 @@ const App: React.FC = () => {
     } finally {
       setConnecting(false);
     }
-  }, [provider, demoMode, setMsg]);
+  }, [waitForProvider, demoMode, setMsg]);
 
   const disconnect = useCallback(() => {
     setAddress('');
@@ -1257,13 +1355,14 @@ const App: React.FC = () => {
           setAdlaBalance(b => b - item.price);
           setVolume(v => v + item.price);
         });
+        if (provider && !demoMode) realUsdcBalance.refresh(); // saldo real muda após tx on-chain
         pushActivity({ kind: 'buy', label: `Compra · ${item.title}`, amount: `-${item.price.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC`, status: 'confirmed' });
         setMsg('Compra confirmada ✓');
         closeItem();
       } catch (e: any) { setMsg(e?.message || 'Falha na compra', 'err'); }
       finally { setBusy(false); }
     })();
-  }, [ensureConnected, buyConfirming, adlaBalance, provider, demoMode, setMsg, pushActivity, closeItem]);
+  }, [ensureConnected, buyConfirming, adlaBalance, provider, demoMode, setMsg, pushActivity, closeItem, realUsdcBalance]);
 
   const handleOffer = useCallback(async (item: NftItem, amount: number) => {
     if (!ensureConnected()) return;
@@ -1273,12 +1372,13 @@ const App: React.FC = () => {
       await callBridge(provider, demoMode, 'adla_nftMakeOffer', [{ mint: item.mint, amount }], () => {
         setSentOffersCount(c => c + 1);
       });
+      if (provider && !demoMode) realUsdcBalance.refresh(); // saldo real muda após tx on-chain
       pushActivity({ kind: 'offer', label: `Oferta enviada · ${item.title}`, amount: `${amount.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC`, status: 'pending' });
       setMsg('Oferta enviada ✓');
       closeItem();
     } catch (e: any) { setMsg(e?.message || 'Falha ao enviar oferta', 'err'); }
     finally { setBusy(false); }
-  }, [ensureConnected, provider, demoMode, setMsg, pushActivity, closeItem]);
+  }, [ensureConnected, provider, demoMode, setMsg, pushActivity, closeItem, realUsdcBalance]);
 
   const handleList = useCallback(async (item: NftItem, price: number) => {
     if (!ensureConnected()) return;
@@ -1288,12 +1388,13 @@ const App: React.FC = () => {
       await callBridge(provider, demoMode, 'adla_nftList', [{ mint: item.mint, price }], () => {
         setItems(prev => prev.map(i => (i.id === item.id ? { ...i, forSale: true, price } : i)));
       });
+      if (provider && !demoMode) realUsdcBalance.refresh(); // saldo real muda após tx on-chain
       pushActivity({ kind: 'list', label: `Listado para venda · ${item.title}`, amount: `${price.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC`, status: 'confirmed' });
       setMsg('Item listado para venda ✓');
       closeItem();
     } catch (e: any) { setMsg(e?.message || 'Falha ao listar item', 'err'); }
     finally { setBusy(false); }
-  }, [ensureConnected, provider, demoMode, setMsg, pushActivity, closeItem]);
+  }, [ensureConnected, provider, demoMode, setMsg, pushActivity, closeItem, realUsdcBalance]);
 
   const handleUnlist = useCallback(async (item: NftItem) => {
     if (!ensureConnected()) return;
@@ -1302,12 +1403,13 @@ const App: React.FC = () => {
       await callBridge(provider, demoMode, 'adla_nftUnlist', [{ mint: item.mint }], () => {
         setItems(prev => prev.map(i => (i.id === item.id ? { ...i, forSale: false } : i)));
       });
+      if (provider && !demoMode) realUsdcBalance.refresh(); // saldo real muda após tx on-chain
       pushActivity({ kind: 'unlist', label: `Removido da venda · ${item.title}`, status: 'confirmed' });
       setMsg('Removido da venda ✓');
       closeItem();
     } catch (e: any) { setMsg(e?.message || 'Falha ao remover da venda', 'err'); }
     finally { setBusy(false); }
-  }, [ensureConnected, provider, demoMode, setMsg, pushActivity, closeItem]);
+  }, [ensureConnected, provider, demoMode, setMsg, pushActivity, closeItem, realUsdcBalance]);
 
   const handleAcceptOffer = useCallback(async (offer: IncomingOffer) => {
     if (!ensureConnected()) return;
@@ -1320,11 +1422,12 @@ const App: React.FC = () => {
         setSoldCount(c => c + 1);
         setVolume(v => v + offer.amount);
       });
+      if (provider && !demoMode) realUsdcBalance.refresh(); // saldo real muda após tx on-chain
       pushActivity({ kind: 'sell', label: `Venda aceita · ${offer.itemTitle}`, amount: `+${offer.amount.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC`, status: 'confirmed' });
       setMsg('Oferta aceita, item vendido ✓');
     } catch (e: any) { setMsg(e?.message || 'Falha ao aceitar oferta', 'err'); }
     finally { setBusy(false); }
-  }, [ensureConnected, provider, demoMode, setMsg, pushActivity]);
+  }, [ensureConnected, provider, demoMode, setMsg, pushActivity, realUsdcBalance]);
 
   const handleDeclineOffer = useCallback(async (offer: IncomingOffer) => {
     if (!ensureConnected()) return;
@@ -1333,11 +1436,12 @@ const App: React.FC = () => {
       await callBridge(provider, demoMode, 'adla_nftDeclineOffer', [{ mint: offer.mint, buyerAddress: offer.buyerAddress }], () => {
         setIncomingOffers(prev => prev.filter(o => o.id !== offer.id));
       });
+      if (provider && !demoMode) realUsdcBalance.refresh(); // saldo real muda após tx on-chain
       pushActivity({ kind: 'decline', label: `Oferta recusada · ${offer.itemTitle}`, status: 'confirmed' });
       setMsg('Oferta recusada');
     } catch (e: any) { setMsg(e?.message || 'Falha ao recusar oferta', 'err'); }
     finally { setBusy(false); }
-  }, [ensureConnected, provider, demoMode, setMsg, pushActivity]);
+  }, [ensureConnected, provider, demoMode, setMsg, pushActivity, realUsdcBalance]);
 
   const ownedItems = useMemo(() => items.filter(i => i.owned), [items]);
   const featuredItems = useMemo(() => items.filter(i => i.featured), [items]);

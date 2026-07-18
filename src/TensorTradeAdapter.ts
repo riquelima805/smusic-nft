@@ -301,6 +301,52 @@ export class TensorTradeAdapter {
     return { mint, amount };
   }
 
+  /**
+   * Saldo real de USDC (payment_mint) da carteira conectada, direto da chain —
+   * sem precisar de método novo no bridge nativo (Kotlin), porque isso é
+   * leitura pública de conta via RPC, não uma transação assinada.
+   *
+   * Usa `getParsedTokenAccountsByOwner` filtrando pelo `PAYMENT_MINT`, e soma
+   * `uiAmount` de todas as token accounts encontradas (normalmente só uma, o
+   * Associated Token Account — mas soma todas por segurança, caso existam
+   * contas "órfãs" antigas do mesmo mint).
+   *
+   * Retorna `{ raw, decimal }`: `raw` = menor unidade (6 casas, útil se for
+   * comparar/somar com preços vindos do adapter), `decimal` = valor "de tela"
+   * já pronto pra `formatUsdc()`.
+   */
+  async fetchUsdcBalance(ownerAddress: string): Promise<{ raw: number; decimal: number }> {
+    const cacheKey = 'usdc_balance_' + ownerAddress;
+    const cached = this.cache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.data;
+
+    try {
+      const owner = new PublicKey(ownerAddress);
+      const { value: tokenAccounts } = await this.connection.getParsedTokenAccountsByOwner(owner, {
+        mint: PAYMENT_MINT,
+      });
+
+      let decimal = 0;
+      for (const { account } of tokenAccounts) {
+        const amount = account.data.parsed?.info?.tokenAmount?.uiAmount;
+        if (typeof amount === 'number') decimal += amount;
+      }
+
+      const result = {
+        decimal,
+        raw: TensorTradeAdapter.decimalToRaw(decimal),
+      };
+
+      // cache curto (15s): saldo muda com mais frequência que listagens, mas
+      // ainda vale evitar bater no RPC a cada render/poll.
+      this.cache.set(cacheKey, { data: result, expiresAt: Date.now() + 15_000 });
+      return result;
+    } catch (error) {
+      console.error(`❌ Falha ao buscar saldo USDC de ${ownerAddress}:`, error);
+      return { raw: 0, decimal: 0 };
+    }
+  }
+
   clearCache() {
     this.cache.clear();
     console.log('🧹 Cache do adapter on-chain limpo');

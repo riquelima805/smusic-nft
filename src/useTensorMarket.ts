@@ -9,7 +9,7 @@
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { tensorAdapter } from './TensorTradeAdapter';
+import { tensorAdapter, TensorTradeAdapter } from './TensorTradeAdapter';
 import type { TensorNFT } from './TensorTradeAdapter';
 import { solanaPrice } from './SolanaPriceService';
 
@@ -17,7 +17,7 @@ export interface TensorMarketItem {
   tensorMint: string;
   tensorName: string;
   tensorImage?: string;
-  tensorPrice: number; // em lamports
+  tensorPrice: number; // menor unidade de USDC (6 casas) — NÃO é lamports de SOL
   tensorPriceUsd: number;
   tensorSeller?: string;
   tensorRarity?: number;
@@ -52,7 +52,9 @@ export function useTensorMarket() {
         return null; // Pula não-listados
       }
 
-      const usdPrice = await solanaPrice.lamportsToUsd(nft.listedPrice);
+      // USDC já é dólar (1 USDC ≈ 1 USD): não precisa mais do preço SOL/USD aqui,
+      // só converter a menor unidade (6 casas) pra unidade inteira.
+      const usdPrice = TensorTradeAdapter.rawToDecimal(nft.listedPrice);
 
       return {
         tensorMint: nft.mint,
@@ -208,6 +210,57 @@ export function useSolanaPrice() {
   }, []);
 
   return { price, loading, error };
+}
+
+/**
+ * Hook para buscar saldo real de USDC (payment_mint) da carteira conectada.
+ * Passa `null`/string vazia enquanto não tiver endereço — ele só busca quando
+ * um endereço válido é informado, e reseta pra 0 quando o endereço some
+ * (desconectou).
+ */
+export function useUsdcBalance(ownerAddress: string | null) {
+  const [balance, setBalance] = useState<number>(0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const isUnmountedRef = useRef(false);
+
+  const refresh = useCallback(async () => {
+    if (!ownerAddress) {
+      setBalance(0);
+      setError(null);
+      return;
+    }
+    setLoading(true);
+    try {
+      const { decimal } = await tensorAdapter.fetchUsdcBalance(ownerAddress);
+      if (isUnmountedRef.current) return;
+      setBalance(decimal);
+      setError(null);
+    } catch (err: any) {
+      if (isUnmountedRef.current) return;
+      setError(err?.message || 'Erro ao buscar saldo USDC');
+    } finally {
+      if (!isUnmountedRef.current) setLoading(false);
+    }
+  }, [ownerAddress]);
+
+  useEffect(() => {
+    isUnmountedRef.current = false;
+    refresh();
+
+    // Auto-refresh a cada 30s enquanto tiver endereço conectado — saldo muda
+    // com mais frequência que listagens (compra/venda/oferta aceita etc.).
+    const interval = setInterval(() => {
+      if (!isUnmountedRef.current) refresh();
+    }, 30_000);
+
+    return () => {
+      isUnmountedRef.current = true;
+      clearInterval(interval);
+    };
+  }, [refresh]);
+
+  return { balance, loading, error, refresh };
 }
 
 /**
