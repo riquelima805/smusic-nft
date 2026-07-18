@@ -1,48 +1,13 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef, createContext } from 'react';
 import './App.css';
-// Integração de preço SOL/USD — mesmo serviço usado no teste (Apptestpegou/useTensorMarket).
-// Ajuste o caminho abaixo conforme onde você colocar o arquivo no seu projeto.
+
 import { useSolanaPrice, useTensorMarket, useUsdcBalance } from './useTensorMarket';
 import type { TensorMarketItem } from './useTensorMarket';
-// Preço agora vem em menor unidade de USDC (6 casas), via TensorTradeAdapter.rawToDecimal.
-// Ajuste o caminho abaixo conforme onde você colocar TensorTradeAdapter.ts no seu projeto.
+
 import { TensorTradeAdapter } from './TensorTradeAdapter';
-// Logo importado como módulo: o Vite resolve o caminho final certo em build,
-// respeitando o `base` (mesmo './') e sem depender da URL atual do navegador.
-// Coloque o arquivo em src/assets/logo.png (veja instrução completa mais abaixo, no header).
+
 import logoUrl from './assets/logo.png';
 
-/* ============================================================================
-   ADLA NFT MARKET — Colecionáveis do Fandom
-   ----------------------------------------------------------------------------
-   Mesmo padrão do ADLA DEFI: esta interface NÃO guarda chave privada e não
-   fala direto com a L3. Ela conversa com a carteira injetada em
-   `window.adlaWallet` (mesmo objeto usado pelo app de DeFi — é a MESMA
-   carteira, só que aqui ela compra, vende e lista colecionáveis em vez de
-   trocar/stakar tokens). Enquanto a extensão real não existe, tudo roda em
-   "Modo Demo": as mesmas funções são chamadas, só que a resposta vem de
-   dados simulados em memória.
-
-   Contrato esperado do provider (ver `callBridge` mais abaixo). Os params
-   batem 1:1 com as contas/instruções do programa Anchor `adla_market` na
-   Solana — `mint` é o endereço do NFT (chave da conta Mint), obrigatório em
-   toda chamada pra o bridge derivar as PDAs (`listing`, `vault`, `offer`,
-   `escrow`) do lado nativo:
-     - sol_requestAccounts    → string[]
-     - sol_accounts           → string[]
-     - adla_nftBuy            { mint, price }                    → { txId }
-     - adla_nftMakeOffer      { mint, amount }                   → { txId }
-     - adla_nftList           { mint, price }                    → { txId }
-     - adla_nftUnlist         { mint }                           → { txId }
-     - adla_nftAcceptOffer    { mint, buyerAddress }              → { txId }
-     - adla_nftDeclineOffer   { mint, buyerAddress }              → { txId }
-   Eventos (provider.on / removeListener):
-     - 'accountsChanged' (string[]) · 'disconnect' () · 'chainChanged' (string)
-   ============================================================================ */
-
-// ---------------------------------------------------------------------------
-// Bridge com a carteira (objeto injetado pelo navegador)
-// ---------------------------------------------------------------------------
 
 type AdlaMethod =
   | 'sol_requestAccounts' | 'sol_accounts'
@@ -68,7 +33,7 @@ declare global {
   }
 }
 
-/** Detecta `window.adlaWallet`, mesmo se a extensão injetar depois do mount. */
+
 function useAdlaProvider(): AdlaWalletProvider | null {
   const [provider, setProvider] = useState<AdlaWalletProvider | null>(
     () => (typeof window !== 'undefined' ? window.adlaWallet ?? null : null)
@@ -90,13 +55,7 @@ function useAdlaProvider(): AdlaWalletProvider | null {
   return provider;
 }
 
-/**
- * Chama o provider real quando existir; cai pro mock local em Modo Demo.
- * IMPORTANTE: mesmo no caminho real, chamamos `applyMock()` (update otimista de UI)
- * depois que a chamada ao provider resolve com sucesso — porque `TensorTradeAdapter`
- * ainda não tem indexador de atividade (fetchActivity() retorna sempre vazio), então
- * sem isso a tela ficaria "travada" no estado antigo mesmo após uma compra real confirmar.
- */
+
 async function callBridge<T>(
   provider: AdlaWalletProvider | null,
   demoMode: boolean,
@@ -117,9 +76,7 @@ async function callBridge<T>(
   throw new Error('Nenhuma carteira ADLA conectada.');
 }
 
-// ---------------------------------------------------------------------------
-// Tipos de domínio
-// ---------------------------------------------------------------------------
+
 
 type Category = 'token' | 'vault' | 'badge' | 'card' | 'pass';
 type Rarity = 'COMUM' | 'RARO' | 'ÉPICO' | 'LENDÁRIO';
@@ -141,11 +98,11 @@ interface NftItem {
   owned: boolean;
   forSale: boolean;
   featured: boolean;
-  /** Imagem real da carta/álbum (quando existir). Se ausente, cai no ícone padrão da categoria. */
+  
   imageUrl?: string;
-  /** Preço em menor unidade de USDC (6 casas) — vem do adla_market on-chain. Mock por enquanto. */
+ 
   priceRaw?: number;
-  /** Nome do álbum de origem, pra exibir junto do artista quando o item vier de um álbum. */
+ 
   albumName?: string;
   artistName?: string;
 }
@@ -153,12 +110,12 @@ interface NftItem {
 interface IncomingOffer {
   id: string;
   itemId: string;
-  /** Mint do NFT ofertado — necessário pra derivar a PDA `offer` no contrato. */
+  
   mint: string;
   itemTitle: string;
   amount: number;
   from: string;
-  /** Endereço completo do ofertante — a PDA `offer`/`escrow` é [mint, buyer]. */
+  
   buyerAddress: string;
   ts: number;
 }
@@ -178,9 +135,7 @@ type MarketTab = 'colecionaveis' | 'venda';
 type SortKey = 'recentes' | 'preco_asc' | 'preco_desc' | 'populares';
 type CategoryFilter = 'all' | Category;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+
 
 const randomId = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 const fakeTxId = () => `0x${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}`;
@@ -200,21 +155,16 @@ function formatUsdc(n: number): string {
   return `${n.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC`;
 }
 
-/**
- * Estimativa em USD a partir do preço bruto (menor unidade de USDC, 6 casas).
- * Como USDC já é dólar (1 USDC ≈ 1 USD), não precisamos mais do preço SOL/USD:
- * só converter com TensorTradeAdapter.rawToDecimal() e formatar como moeda.
- */
+
 function formatUsdEstimate(priceRaw: number | undefined): string | null {
   if (!priceRaw) return null;
   const usd = TensorTradeAdapter.rawToDecimal(priceRaw);
   return usd.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-// Preço SOL/USD atual (via useSolanaPrice) disponível pra qualquer componente
-// sem precisar passar prop por todo lugar — só usar o hook `useSolUsd()`.
+
 const SolUsdContext = createContext<number | null>(null);
-//const useSolUsd = () => useContext(SolUsdContext);
+
 
 function timeAgo(ts: number): string {
   const d = Date.now() - ts;
@@ -234,12 +184,7 @@ const RARITY_CLASS: Record<Rarity, string> = {
   COMUM: 'comum', RARO: 'raro', 'ÉPICO': 'epico', 'LENDÁRIO': 'lendario',
 };
 
-// ---------------------------------------------------------------------------
-// Dados de álbuns/cartas — hoje vem de um JSON local (mock), amanhã troca por
-// fetch numa API/indexer real sem mexer no resto do app. O formato abaixo é o
-// MESMO que vocês já usam (album_id, cards[], nft_tx_id, image_url etc.) —
-// só precisa apontar `ALBUMS_DATA` pra resposta da API quando ela existir.
-// ---------------------------------------------------------------------------
+
 
 interface AlbumCardData {
   card_id: string;
@@ -261,8 +206,7 @@ interface AlbumData {
   cards: AlbumCardData[];
 }
 
-// Placeholder — troque por `await fetch('/api/albums')` (ou o indexer da L3)
-// quando o endpoint real estiver pronto. A UI já sabe consumir esse formato.
+
 const ALBUMS_DATA: AlbumData[] = [
   {
     album_id: 'album_born_pink',
@@ -278,14 +222,12 @@ const ALBUMS_DATA: AlbumData[] = [
   },
 ];
 
-// Raridades e preços ainda não vêm da API — sorteamos aqui só pra Modo Demo.
-// Quando o backend passar a mandar `rarity`/`price_lamports` reais por carta,
-// é só ler os valores em vez de sortear (os `Math.random()` abaixo somem).
+
 const DEMO_RARITIES: Rarity[] = ['COMUM', 'RARO', 'ÉPICO', 'LENDÁRIO'];
 function randomRarity(): Rarity {
   return DEMO_RARITIES[Math.floor(Math.random() * DEMO_RARITIES.length)];
 }
-/** Preço "de tela" em USDC (unidade inteira, ex: 240,00 USDC) — só pro Modo Demo. */
+
 function randomPriceUsdc(): number {
   return Math.round((20 + Math.random() * 300) * 100) / 100;
 }
@@ -294,7 +236,7 @@ function randomListingMode(): ListingMode {
   return Math.random() < 0.7 ? 'buy' : 'offer';
 }
 
-/** Converte os álbuns/cartas (JSON local por enquanto, API depois) em NftItem pro marketplace. */
+
 function buildCatalogFromAlbums(albums: AlbumData[]): NftItem[] {
   const items: NftItem[] = [];
   albums.forEach(album => {
@@ -329,16 +271,7 @@ function genCatalog(): NftItem[] {
   return buildCatalogFromAlbums(ALBUMS_DATA);
 }
 
-/**
- * Converte um item vindo do on-chain (useTensorMarket) pro formato NftItem da UI.
- * Só temos mint/nome/imagem/preço/vendedor reais — rarity, tags, likes, "featured"
- * etc. ainda não existem on-chain, então entram com valor neutro/zerado.
- *
- * ⚠️ `owned` fica sempre `false` aqui: pra saber de verdade se A CARTEIRA CONECTADA
- * é dona do NFT, precisaria consultar os token accounts dela (getTokenAccountsByOwner
- * pro mint em questão) — isso ainda não existe no TensorTradeAdapter. Por enquanto,
- * a aba "Coleção" fica vazia pra carteira real até essa consulta ser implementada.
- */
+
 function mapOnChainItem(t: TensorMarketItem, connectedAddress: string): NftItem {
   return {
     id: t.tensorMint,
@@ -352,7 +285,7 @@ function mapOnChainItem(t: TensorMarketItem, connectedAddress: string): NftItem 
     listingMode: 'buy',
     likes: 0,
     liked: false,
-    owned: false, // TODO: comparar token accounts da carteira conectada com o mint
+    owned: false, 
     forSale: t.tensorListed && t.tensorSeller === connectedAddress,
     featured: false,
     imageUrl: t.tensorImage,
@@ -374,9 +307,6 @@ function genActivity(): ActivityItem[] {
   ];
 }
 
-// ---------------------------------------------------------------------------
-// Ícones (sem dependência externa)
-// ---------------------------------------------------------------------------
 
 type IconName =
   | 'home' | 'market' | 'collection' | 'wallet' | 'profile'
@@ -428,9 +358,6 @@ function Icon({ name, size = 20, className = '', spin = false }: { name: IconNam
 
 const CATEGORY_ICON: Record<Category, IconName> = { token: 'coin', vault: 'box', badge: 'shield', card: 'card', pass: 'ticket' };
 
-// ---------------------------------------------------------------------------
-// Átomos de UI
-// ---------------------------------------------------------------------------
 
 function BottomSheet({ open, onClose, title, children }: { open: boolean; onClose: () => void; title: string; children: React.ReactNode }) {
   if (!open) return null;
@@ -596,9 +523,6 @@ function InstallHintSheet({ open, onClose, onDemo }: { open: boolean; onClose: (
   );
 }
 
-// ---------------------------------------------------------------------------
-// Cards
-// ---------------------------------------------------------------------------
 
 function FeaturedCard({ item, onOpen, onToggleLike }: { item: NftItem; onOpen: (i: NftItem) => void; onToggleLike: (i: NftItem) => void }) {
   const usdEstimate = formatUsdEstimate(item.priceRaw);
@@ -735,9 +659,6 @@ function ActivityRow({ item }: { item: ActivityItem }) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Sheets
-// ---------------------------------------------------------------------------
 
 function FilterSheet({
   open, onClose, category, onCategory, sort, onSort,
@@ -820,7 +741,7 @@ function ItemSheet({
         )
       )}
 
-      {/* Item de terceiro à venda — comprar ou ofertar */}
+      {/**/}
       {item.listingMode !== 'unlisted' && !item.owned && (
         <>
           <div className="sheet-token-row">
@@ -852,7 +773,7 @@ function ItemSheet({
         </>
       )}
 
-      {/* Item que eu possuo e posso (des)listar */}
+      {/**/}
       {item.listingMode !== 'unlisted' && item.owned && (
         item.forSale ? (
           <>
@@ -882,9 +803,6 @@ function ItemSheet({
   );
 }
 
-// ---------------------------------------------------------------------------
-// Views
-// ---------------------------------------------------------------------------
 
 function HomeView({
   ownedCount, forSaleCount, collectionValue, adlaBalance, offersCount,
@@ -1106,7 +1024,7 @@ function ProfileView({
         <div className="profile-id-row">
           <span className="profile-avatar"><Icon name="profile" size={26} /></span>
           <div>
-            <h3 style={{ marginBottom: 2 }}>Fã ADLA</h3>
+            <h3 style={{ marginBottom: 2 }}>user 500</h3>
             <span className="hero-sub" style={{ margin: 0 }}>{address ? shortAddr(address) : 'Modo Demo'}</span>
           </div>
         </div>
@@ -1137,18 +1055,14 @@ function ProfileView({
           </div>
         </div>
         <label className="dropdown-item dropdown-toggle" style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)' }}>
-          <span>Modo Demo</span>
+          <span></span>
           <input type="checkbox" checked={demoMode} onChange={e => onToggleDemo(e.target.checked)} />
         </label>
-        <p className="sheet-text" style={{ marginTop: 10 }}>ADLA NFT Market · v1.0 · usa a mesma carteira do ADLA DEFI.</p>
+        <p className="sheet-text" style={{ marginTop: 10 }}>ADLA NFT Market · v1.0</p>
       </section>
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// App
-// ---------------------------------------------------------------------------
 
 const TABS: { key: ViewKey; label: string; icon: IconName }[] = [
   { key: 'home', label: 'Início', icon: 'home' },
@@ -1160,11 +1074,9 @@ const TABS: { key: ViewKey; label: string; icon: IconName }[] = [
 
 const App: React.FC = () => {
   const provider = useAdlaProvider();
-  // Preço SOL/USD real (CoinGecko/Pyth/Birdeye, com cache) — só pra mostrar a
-  // estimativa em USD ao lado do preço em USDC. Ainda não afeta o saldo/compra.
+  
   const { price: solUsdPrice } = useSolanaPrice();
-  // Listagens reais on-chain (programa adla_market). Só usadas quando NÃO estiver
-  // em Modo Demo — em Modo Demo o catálogo continua sendo o mock local (genCatalog).
+  
   const onChainMarket = useTensorMarket();
   const demoAutoSetRef = useRef(false);
 
@@ -1191,15 +1103,7 @@ const App: React.FC = () => {
   const [sentOffersCount, setSentOffersCount] = useState(0);
   const [volume, setVolume] = useState(0);
 
-  /**
-   * Fonte de dados muda conforme o modo:
-   *  - Modo Demo ligado           → catálogo/ofertas/atividade/saldo MOCK (só ilustrativo).
-   *  - Carteira real conectada    → catálogo vem do on-chain (adla_market); saldo vem do
-   *                                  saldo real de USDC (realUsdcBalance); ofertas/atividade
-   *                                  ficam vazias até existir indexador real (ver TODO).
-   *  - Nada conectado ainda       → mostra o catálogo mock só pra não abrir tela vazia,
-   *                                  mas SEM saldo/atividade fake (nada foi "conectado").
-   */
+
   useEffect(() => {
     if (demoMode) {
       setItems(genCatalog());
@@ -1224,7 +1128,7 @@ const App: React.FC = () => {
       return;
     }
 
-    // Nem demo, nem carteira conectada ainda: só o catálogo (visualização), sem dados de conta.
+    
     setItems(genCatalog());
     setIncomingOffers([]);
     setActivity([]);
@@ -1248,7 +1152,7 @@ const App: React.FC = () => {
     if (type !== 'loading') toastTimer.current = window.setTimeout(() => setStatus(null), 3200);
   }, []);
 
-  // auto-desativa o Modo Demo na primeira vez que uma carteira real é detectada
+
   useEffect(() => {
     if (provider && !demoAutoSetRef.current) {
       demoAutoSetRef.current = true;
@@ -1256,7 +1160,7 @@ const App: React.FC = () => {
     }
   }, [provider]);
 
-  // assina eventos do provider quando ele existir
+  
   useEffect(() => {
     if (!provider) return;
     const onAccounts = (accs: string[]) => setAddress(accs?.[0] ?? '');
@@ -1274,8 +1178,7 @@ const App: React.FC = () => {
     setActivity(prev => [{ ...item, id: randomId(), ts: Date.now() }, ...prev].slice(0, 30));
   }, []);
 
-  /** Espera até `timeoutMs` pelo `window.adlaWallet` aparecer (o bridge nativo injeta
-   *  o script de forma assíncrona, então pode não estar pronto no exato instante do clique). */
+  
   const waitForProvider = useCallback(async (timeoutMs = 3000): Promise<AdlaWalletProvider | null> => {
     if (provider) return provider;
     const start = Date.now();
@@ -1355,7 +1258,7 @@ const App: React.FC = () => {
           setAdlaBalance(b => b - item.price);
           setVolume(v => v + item.price);
         });
-        if (provider && !demoMode) realUsdcBalance.refresh(); // saldo real muda após tx on-chain
+        if (provider && !demoMode) realUsdcBalance.refresh(); 
         pushActivity({ kind: 'buy', label: `Compra · ${item.title}`, amount: `-${item.price.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC`, status: 'confirmed' });
         setMsg('Compra confirmada ✓');
         closeItem();
@@ -1372,7 +1275,7 @@ const App: React.FC = () => {
       await callBridge(provider, demoMode, 'adla_nftMakeOffer', [{ mint: item.mint, amount }], () => {
         setSentOffersCount(c => c + 1);
       });
-      if (provider && !demoMode) realUsdcBalance.refresh(); // saldo real muda após tx on-chain
+      if (provider && !demoMode) realUsdcBalance.refresh(); 
       pushActivity({ kind: 'offer', label: `Oferta enviada · ${item.title}`, amount: `${amount.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC`, status: 'pending' });
       setMsg('Oferta enviada ✓');
       closeItem();
@@ -1403,7 +1306,7 @@ const App: React.FC = () => {
       await callBridge(provider, demoMode, 'adla_nftUnlist', [{ mint: item.mint }], () => {
         setItems(prev => prev.map(i => (i.id === item.id ? { ...i, forSale: false } : i)));
       });
-      if (provider && !demoMode) realUsdcBalance.refresh(); // saldo real muda após tx on-chain
+      if (provider && !demoMode) realUsdcBalance.refresh();
       pushActivity({ kind: 'unlist', label: `Removido da venda · ${item.title}`, status: 'confirmed' });
       setMsg('Removido da venda ✓');
       closeItem();
@@ -1436,7 +1339,7 @@ const App: React.FC = () => {
       await callBridge(provider, demoMode, 'adla_nftDeclineOffer', [{ mint: offer.mint, buyerAddress: offer.buyerAddress }], () => {
         setIncomingOffers(prev => prev.filter(o => o.id !== offer.id));
       });
-      if (provider && !demoMode) realUsdcBalance.refresh(); // saldo real muda após tx on-chain
+      if (provider && !demoMode) realUsdcBalance.refresh(); 
       pushActivity({ kind: 'decline', label: `Oferta recusada · ${offer.itemTitle}`, status: 'confirmed' });
       setMsg('Oferta recusada');
     } catch (e: any) { setMsg(e?.message || 'Falha ao recusar oferta', 'err'); }
@@ -1473,20 +1376,16 @@ const App: React.FC = () => {
       <div className="app-shell">
         <header className="app-header">
           <div className="brand" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            {/* Logo: coloque o arquivo em src/assets/logo.png.
-               Importar como módulo (linha do import lá em cima) é mais seguro que usar
-               um caminho tipo "/logo.png" ou "./logo.png": o Vite gera a URL final certa
-               em build, considerando o `base` do vite.config.ts — não depende da URL
-               atual do navegador nem quebra se o app navegar pra outra "página". */}
+            {/*  */}
             <img
               src={logoUrl}
-              alt="ADLA NFT Market"
+              alt="ADLA Market"
               className="brand-logo"
               style={{ width: 32, height: 32, borderRadius: 8, objectFit: 'cover' }}
             />
             <div className="brand-text" style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.1 }}>
               <span className="brand-mark">ADLA NFT</span>
-              <span className="brand-sub">FANDOM COLLECTIBLES</span>
+              <span className="brand-sub"></span>
             </div>
           </div>
           <WalletButton
@@ -1507,9 +1406,9 @@ const App: React.FC = () => {
           <span className="ticker-static">{statusLabel}</span>
           <div className="ticker-marquee" aria-hidden="true">
             <span>
-              🎴 NOVA CARTA HOLOGRÁFICA ENCORE CHEGANDO&nbsp;&nbsp;&nbsp;&nbsp;
-              💎 LEILÃO DO PASSE DE BASTIDORES EM BREVE&nbsp;&nbsp;&nbsp;&nbsp;
-              🔥 VAULTS ESTRATÉGICOS COM OFERTA LIMITADA&nbsp;&nbsp;&nbsp;&nbsp;
+               NOVA CARTA HOLOGRÁFICA ENCORE CHEGANDO&nbsp;&nbsp;&nbsp;&nbsp;
+               LEILÃO DO PASSE DE BASTIDORES EM BREVE&nbsp;&nbsp;&nbsp;&nbsp;
+               VAULTS ESTRATÉGICOS COM OFERTA LIMITADA&nbsp;&nbsp;&nbsp;&nbsp;
             </span>
           </div>
         </div>
