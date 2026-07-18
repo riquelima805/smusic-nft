@@ -1,5 +1,11 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef, createContext } from 'react';
 import './App.css';
+// Integração de preço SOL/USD — mesmo serviço usado no teste (Apptestpegou/useTensorMarket).
+// Ajuste o caminho abaixo conforme onde você colocar o arquivo no seu projeto.
+import { useSolanaPrice } from './useTensorMarket';
+// Preço agora vem em menor unidade de USDC (6 casas), via TensorTradeAdapter.rawToDecimal.
+// Ajuste o caminho abaixo conforme onde você colocar TensorTradeAdapter.ts no seu projeto.
+import { TensorTradeAdapter } from './TensorTradeAdapter';
 
 /* ============================================================================
    ADLA NFT MARKET — Colecionáveis do Fandom
@@ -12,15 +18,19 @@ import './App.css';
    "Modo Demo": as mesmas funções são chamadas, só que a resposta vem de
    dados simulados em memória.
 
-   Contrato esperado do provider (ver `callBridge` mais abaixo):
+   Contrato esperado do provider (ver `callBridge` mais abaixo). Os params
+   batem 1:1 com as contas/instruções do programa Anchor `adla_market` na
+   Solana — `mint` é o endereço do NFT (chave da conta Mint), obrigatório em
+   toda chamada pra o bridge derivar as PDAs (`listing`, `vault`, `offer`,
+   `escrow`) do lado nativo:
      - adla_requestAccounts   → string[]
      - adla_accounts          → string[]
-     - adla_nftBuy            → { txId }
-     - adla_nftMakeOffer      → { txId }
-     - adla_nftList           → { txId }
-     - adla_nftUnlist         → { txId }
-     - adla_nftAcceptOffer    → { txId }
-     - adla_nftDeclineOffer   → { txId }
+     - adla_nftBuy            { mint, price }                    → { txId }
+     - adla_nftMakeOffer      { mint, amount }                   → { txId }
+     - adla_nftList           { mint, price }                    → { txId }
+     - adla_nftUnlist         { mint }                           → { txId }
+     - adla_nftAcceptOffer    { mint, buyerAddress }              → { txId }
+     - adla_nftDeclineOffer   { mint, buyerAddress }              → { txId }
    Eventos (provider.on / removeListener):
      - 'accountsChanged' (string[]) · 'disconnect' () · 'chainChanged' (string)
    ============================================================================ */
@@ -104,6 +114,8 @@ type ListingMode = 'buy' | 'offer' | 'unlisted';
 
 interface NftItem {
   id: string;
+  /** Endereço do mint SPL na Solana — identidade real do NFT no contrato. */
+  mint: string;
   title: string;
   category: Category;
   rarity: Rarity;
@@ -116,9 +128,27 @@ interface NftItem {
   owned: boolean;
   forSale: boolean;
   featured: boolean;
+  /** Imagem real da carta/álbum (quando existir). Se ausente, cai no ícone padrão da categoria. */
+  imageUrl?: string;
+  /** Preço em menor unidade de USDC (6 casas) — vem do adla_market on-chain. Mock por enquanto. */
+  priceRaw?: number;
+  /** Nome do álbum de origem, pra exibir junto do artista quando o item vier de um álbum. */
+  albumName?: string;
+  artistName?: string;
 }
 
-interface IncomingOffer { id: string; itemId: string; itemTitle: string; amount: number; from: string; ts: number; }
+interface IncomingOffer {
+  id: string;
+  itemId: string;
+  /** Mint do NFT ofertado — necessário pra derivar a PDA `offer` no contrato. */
+  mint: string;
+  itemTitle: string;
+  amount: number;
+  from: string;
+  /** Endereço completo do ofertante — a PDA `offer`/`escrow` é [mint, buyer]. */
+  buyerAddress: string;
+  ts: number;
+}
 
 interface ActivityItem {
   id: string;
@@ -153,9 +183,25 @@ function shortAddr(addr: string): string {
   return addr.length > 14 ? `${addr.slice(0, 8)}…${addr.slice(-6)}` : addr;
 }
 
-function formatAdla(n: number): string {
-  return `${n.toLocaleString('pt-BR', { maximumFractionDigits: 0 })} $ADLA`;
+function formatUsdc(n: number): string {
+  return `${n.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC`;
 }
+
+/**
+ * Estimativa em USD a partir do preço bruto (menor unidade de USDC, 6 casas).
+ * Como USDC já é dólar (1 USDC ≈ 1 USD), não precisamos mais do preço SOL/USD:
+ * só converter com TensorTradeAdapter.rawToDecimal() e formatar como moeda.
+ */
+function formatUsdEstimate(priceRaw: number | undefined): string | null {
+  if (!priceRaw) return null;
+  const usd = TensorTradeAdapter.rawToDecimal(priceRaw);
+  return usd.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+// Preço SOL/USD atual (via useSolanaPrice) disponível pra qualquer componente
+// sem precisar passar prop por todo lugar — só usar o hook `useSolUsd()`.
+const SolUsdContext = createContext<number | null>(null);
+//const useSolUsd = () => useContext(SolUsdContext);
 
 function timeAgo(ts: number): string {
   const d = Date.now() - ts;
@@ -176,36 +222,112 @@ const RARITY_CLASS: Record<Rarity, string> = {
 };
 
 // ---------------------------------------------------------------------------
-// Dados mock (Modo Demo) — substituídos por dados reais quando o provider existir
+// Dados de álbuns/cartas — hoje vem de um JSON local (mock), amanhã troca por
+// fetch numa API/indexer real sem mexer no resto do app. O formato abaixo é o
+// MESMO que vocês já usam (album_id, cards[], nft_tx_id, image_url etc.) —
+// só precisa apontar `ALBUMS_DATA` pra resposta da API quando ela existir.
 // ---------------------------------------------------------------------------
 
+interface AlbumCardData {
+  card_id: string;
+  nft_tx_id: string;
+  image_url: string;
+  idol_name: string;
+  edition_name: string;
+  likes: number;
+  comments: number;
+  shares: number;
+  total_owned: number;
+}
+
+interface AlbumData {
+  album_id: string;
+  album_name: string;
+  artist_name: string;
+  cover_image_url: string;
+  cards: AlbumCardData[];
+}
+
+// Placeholder — troque por `await fetch('/api/albums')` (ou o indexer da L3)
+// quando o endpoint real estiver pronto. A UI já sabe consumir esse formato.
+const ALBUMS_DATA: AlbumData[] = [
+  {
+    album_id: 'album_born_pink',
+    album_name: 'Born Pink',
+    artist_name: 'BLACKPINK',
+    cover_image_url: 'https://pub-1f68b60058f841f7baa2f70e20400dc7.r2.dev/album/capablapink.png',
+    cards: [
+      { card_id: 'card001', nft_tx_id: 'at1exemplo0000000000000000000000000000000000000000000000000000', image_url: 'https://pub-1f68b60058f841f7baa2f70e20400dc7.r2.dev/album/jisso2.png', idol_name: 'Jisoo', edition_name: 'Base Pink', likes: 34, comments: 5, shares: 2, total_owned: 1 },
+      { card_id: 'card002', nft_tx_id: 'at1exemplo0000000000000000000000000000000000000000000000000000', image_url: 'https://pub-1f68b60058f841f7baa2f70e20400dc7.r2.dev/album/jenie2.png', idol_name: 'Jennie', edition_name: 'Base Pink', likes: 34, comments: 5, shares: 2, total_owned: 1 },
+      { card_id: 'card003', nft_tx_id: 'at1exemplo0000000000000000000000000000000000000000000000000000', image_url: 'https://pub-1f68b60058f841f7baa2f70e20400dc7.r2.dev/album/rose2.png', idol_name: 'Rosé', edition_name: 'Base Pink', likes: 34, comments: 5, shares: 2, total_owned: 1 },
+      { card_id: 'card004', nft_tx_id: 'at1exemplo0000000000000000000000000000000000000000000000000000', image_url: 'https://pub-1f68b60058f841f7baa2f70e20400dc7.r2.dev/album/lisa2.png', idol_name: 'Lisa', edition_name: 'Base Pink', likes: 34, comments: 5, shares: 2, total_owned: 1 },
+    ],
+  },
+];
+
+// Raridades e preços ainda não vêm da API — sorteamos aqui só pra Modo Demo.
+// Quando o backend passar a mandar `rarity`/`price_lamports` reais por carta,
+// é só ler os valores em vez de sortear (os `Math.random()` abaixo somem).
+const DEMO_RARITIES: Rarity[] = ['COMUM', 'RARO', 'ÉPICO', 'LENDÁRIO'];
+function randomRarity(): Rarity {
+  return DEMO_RARITIES[Math.floor(Math.random() * DEMO_RARITIES.length)];
+}
+/** Preço "de tela" em USDC (unidade inteira, ex: 240,00 USDC) — só pro Modo Demo. */
+function randomPriceUsdc(): number {
+  return Math.round((20 + Math.random() * 300) * 100) / 100;
+}
+
+function randomListingMode(): ListingMode {
+  return Math.random() < 0.7 ? 'buy' : 'offer';
+}
+
+/** Converte os álbuns/cartas (JSON local por enquanto, API depois) em NftItem pro marketplace. */
+function buildCatalogFromAlbums(albums: AlbumData[]): NftItem[] {
+  const items: NftItem[] = [];
+  albums.forEach(album => {
+    album.cards.forEach((card, idx) => {
+      const priceUsdc = randomPriceUsdc();
+      items.push({
+        id: card.card_id,
+        mint: card.nft_tx_id,
+        title: `${card.idol_name} · ${card.edition_name}`,
+        category: 'card',
+        rarity: randomRarity(),
+        tags: [album.album_name.toUpperCase(), album.artist_name.toUpperCase()],
+        price: priceUsdc,
+        priceRaw: TensorTradeAdapter.decimalToRaw(priceUsdc), // mesmo valor, em menor unidade de USDC
+        listingMode: randomListingMode(),
+        edition: card.edition_name,
+        likes: card.likes,
+        liked: false,
+        owned: card.total_owned > 0,
+        forSale: false,
+        featured: idx === 0,
+        imageUrl: card.image_url,
+        albumName: album.album_name,
+        artistName: album.artist_name,
+      });
+    });
+  });
+  return items;
+}
+
 function genCatalog(): NftItem[] {
-  return [
-    { id: 'n1', title: 'Token de Liquidez ETH/ADLA', category: 'token', rarity: 'RARO', tags: ['AUTO-COMPOUNDING'], price: 1200, listingMode: 'buy', likes: 312, liked: false, owned: false, forSale: false, featured: true },
-    { id: 'n2', title: 'Vault Estratégico Especial', category: 'vault', rarity: 'ÉPICO', tags: ['MODELO DE ESTRATÉGIA', 'INVESTIMENTO AUTOMATIZADO'], price: 850, listingMode: 'offer', likes: 198, liked: false, owned: false, forSale: false, featured: true },
-    { id: 'n3', title: 'Carta Holográfica · Encore #014', category: 'card', rarity: 'LENDÁRIO', tags: ['ANIMADA', 'EDIÇÃO LIMITADA'], price: 2400, listingMode: 'buy', edition: '14/100', likes: 540, liked: true, owned: true, forSale: true, featured: false },
-    { id: 'n4', title: 'Distintivo · Pioneiro', category: 'badge', rarity: 'COMUM', tags: ['PRIMEIROS 1000 FÃS'], price: 0, listingMode: 'unlisted', likes: 89, liked: false, owned: true, forSale: false, featured: false },
-    { id: 'n5', title: 'Passe Vitalício Backstage', category: 'pass', rarity: 'ÉPICO', tags: ['ACESSO VIP', 'VOTO EXTRA NO CONSELHO'], price: 1750, listingMode: 'buy', likes: 421, liked: false, owned: false, forSale: false, featured: true },
-    { id: 'n6', title: 'Token de Liquidez ADLA/USDC', category: 'token', rarity: 'COMUM', tags: ['BAIXA VOLATILIDADE'], price: 320, listingMode: 'buy', likes: 75, liked: false, owned: false, forSale: false, featured: false },
-    { id: 'n7', title: 'Vault Conservador', category: 'vault', rarity: 'RARO', tags: ['RENDA ESTÁVEL'], price: 540, listingMode: 'buy', likes: 130, liked: false, owned: false, forSale: false, featured: false },
-    { id: 'n8', title: 'Carta Holográfica · Setlist #002', category: 'card', rarity: 'RARO', tags: ['SÉRIE INAUGURAL'], price: 690, listingMode: 'offer', likes: 266, liked: false, owned: true, forSale: false, featured: false },
-    { id: 'n9', title: 'Distintivo · Mestre das Pools', category: 'badge', rarity: 'ÉPICO', tags: ['EXIGE 1500+ $ADLA EM STAKE'], price: 0, listingMode: 'unlisted', likes: 64, liked: false, owned: false, forSale: false, featured: false },
-    { id: 'n10', title: 'Passe de Bastidores · Temporada 1', category: 'pass', rarity: 'LENDÁRIO', tags: ['ÚNICO POR FÃ'], price: 3200, listingMode: 'offer', likes: 802, liked: false, owned: false, forSale: false, featured: true },
-  ];
+  return buildCatalogFromAlbums(ALBUMS_DATA);
 }
 
 function genIncomingOffers(): IncomingOffer[] {
   return [
-    { id: 'o1', itemId: 'n3', itemTitle: 'Carta Holográfica · Encore #014', amount: 2150, from: 'fã_anônimo·82f1', ts: Date.now() - 40 * 60_000 },
+    { id: 'o1', itemId: 'n3', mint: '', itemTitle: 'Carta Holográfica · Encore #014', amount: 2150, from: 'fã_anônimo·82f1', buyerAddress: genDemoAddress(), ts: Date.now() - 40 * 60_000 },
   ];
 }
 
 function genActivity(): ActivityItem[] {
   const now = Date.now();
   return [
-    { id: randomId(), kind: 'buy', label: 'Compra · Token de Liquidez ETH/ADLA', amount: '-1200 $ADLA', ts: now - 2 * 3_600_000, status: 'confirmed' },
-    { id: randomId(), kind: 'list', label: 'Listado para venda · Carta Holográfica · Encore #014', amount: '2400 $ADLA', ts: now - 26 * 3_600_000, status: 'confirmed' },
-    { id: randomId(), kind: 'offer', label: 'Oferta enviada · Vault Estratégico Especial', amount: '700 $ADLA', ts: now - 3 * 24 * 3_600_000, status: 'pending' },
+    { id: randomId(), kind: 'buy', label: 'Compra · Token de Liquidez ETH/ADLA', amount: '-1.200,00 USDC', ts: now - 2 * 3_600_000, status: 'confirmed' },
+    { id: randomId(), kind: 'list', label: 'Listado para venda · Carta Holográfica · Encore #014', amount: '2.400,00 USDC', ts: now - 26 * 3_600_000, status: 'confirmed' },
+    { id: randomId(), kind: 'offer', label: 'Oferta enviada · Vault Estratégico Especial', amount: '700,00 USDC', ts: now - 3 * 24 * 3_600_000, status: 'pending' },
   ];
 }
 
@@ -289,11 +411,22 @@ function RarityBadge({ rarity, size = 'md' }: { rarity: Rarity; size?: 'sm' | 'm
   return <span className={`rarity-badge rarity-${RARITY_CLASS[rarity]} rarity-${size}`}>{rarity}</span>;
 }
 
-function NftArt({ category, rarity, size = 'md', owned = false }: { category: Category; rarity: Rarity; size?: 'sm' | 'md' | 'lg'; owned?: boolean }) {
+function NftArt({ category, rarity, size = 'md', owned = false, imageUrl }: { category: Category; rarity: Rarity; size?: 'sm' | 'md' | 'lg'; owned?: boolean; imageUrl?: string }) {
+  const [imgFailed, setImgFailed] = useState(false);
+  const showImage = !!imageUrl && !imgFailed;
   return (
     <div className={`nft-art nft-art-${size} nft-art-${category} rarity-glow-${RARITY_CLASS[rarity]}`}>
       <span className="nft-art-shine" aria-hidden="true" />
-      <Icon name={CATEGORY_ICON[category]} size={size === 'lg' ? 56 : size === 'md' ? 34 : 24} />
+      {showImage ? (
+        <img
+          src={imageUrl}
+          alt=""
+          onError={() => setImgFailed(true)}
+          style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 'inherit', position: 'relative', zIndex: 0 }}
+        />
+      ) : (
+        <Icon name={CATEGORY_ICON[category]} size={size === 'lg' ? 56 : size === 'md' ? 34 : 24} />
+      )}
       {owned && (
         <span className="nft-owned-ribbon"><Icon name="check" size={11} /> Sua</span>
       )}
@@ -425,10 +558,11 @@ function InstallHintSheet({ open, onClose, onDemo }: { open: boolean; onClose: (
 // ---------------------------------------------------------------------------
 
 function FeaturedCard({ item, onOpen, onToggleLike }: { item: NftItem; onOpen: (i: NftItem) => void; onToggleLike: (i: NftItem) => void }) {
+  const usdEstimate = formatUsdEstimate(item.priceRaw);
   return (
     <div className="feature-card" onClick={() => onOpen(item)}>
       <div className="feature-card-art">
-        <NftArt category={item.category} rarity={item.rarity} size="lg" owned={item.owned} />
+        <NftArt category={item.category} rarity={item.rarity} size="lg" owned={item.owned} imageUrl={item.imageUrl} />
         <LikeButton liked={item.liked} likes={item.likes} onToggle={() => onToggleLike(item)} />
       </div>
       <div className="feature-card-info">
@@ -439,7 +573,10 @@ function FeaturedCard({ item, onOpen, onToggleLike }: { item: NftItem; onOpen: (
         <div className="feature-price-row">
           <div className="feature-price">
             <span className="label">{item.listingMode === 'offer' ? 'Oferta sugerida' : 'Preço'}</span>
-            <span className="value">{formatAdla(item.price)}</span>
+            <span className="value">{formatUsdc(item.price)}</span>
+            {usdEstimate && (
+              <span className="label" style={{ marginTop: 2 }}>≈ {usdEstimate}</span>
+            )}
           </div>
           <button type="button" className="btn-buy-now" onClick={e => { e.stopPropagation(); onOpen(item); }}>
             {item.owned ? 'Ver item' : item.listingMode === 'buy' ? <><Icon name="cart" size={14} /> Comprar</> : <><Icon name="gavel" size={14} /> Oferta</>}
@@ -478,10 +615,11 @@ function FeaturedCarousel({ items, onOpen, onToggleLike }: { items: NftItem[]; o
 }
 
 function NftGridCard({ item, onOpen, onToggleLike }: { item: NftItem; onOpen: (i: NftItem) => void; onToggleLike: (i: NftItem) => void }) {
+  const usdEstimate = formatUsdEstimate(item.priceRaw);
   return (
     <div className="grid-card" onClick={() => onOpen(item)}>
       <div className="grid-card-art">
-        <NftArt category={item.category} rarity={item.rarity} size="md" owned={item.owned} />
+        <NftArt category={item.category} rarity={item.rarity} size="md" owned={item.owned} imageUrl={item.imageUrl} />
         {item.forSale && <span className="for-sale-tag">À VENDA</span>}
       </div>
       <div className="grid-card-body">
@@ -497,7 +635,10 @@ function NftGridCard({ item, onOpen, onToggleLike }: { item: NftItem; onOpen: (i
             </span>
           ) : (
             <>
-              <span className="grid-card-price">{formatAdla(item.price)}</span>
+              <span className="grid-card-price">
+                {formatUsdc(item.price)}
+                {usdEstimate && <><br /><span style={{ fontSize: '0.75em', opacity: 0.65 }}>≈ {usdEstimate}</span></>}
+              </span>
               {!item.owned && (
                 <button type="button" className="grid-card-cta" onClick={e => { e.stopPropagation(); onOpen(item); }}>
                   {item.listingMode === 'buy' ? <Icon name="cart" size={13} /> : <Icon name="gavel" size={13} />}
@@ -520,7 +661,7 @@ function OfferRow({ offer, busy, onAccept, onDecline }: { offer: IncomingOffer; 
         <span className="offer-from">de {offer.from} · {timeAgo(offer.ts)}</span>
       </div>
       <div className="offer-actions">
-        <span className="offer-amount">{formatAdla(offer.amount)}</span>
+        <span className="offer-amount">{formatUsdc(offer.amount)}</span>
         <div className="offer-btns">
           <button type="button" className="btn-ghost btn-ghost-danger" disabled={busy} onClick={() => onDecline(offer)}>Recusar</button>
           <button type="button" className="btn-accept" disabled={busy} onClick={() => onAccept(offer)}>Aceitar</button>
@@ -600,12 +741,18 @@ function ItemSheet({
 }) {
   if (!item) return null;
   const canAfford = adlaBalance >= item.price;
+  const usdEstimate = formatUsdEstimate(item.priceRaw);
 
   return (
     <BottomSheet open={open} onClose={onClose} title="Detalhes do Item">
       <div className="item-sheet-art">
-        <NftArt category={item.category} rarity={item.rarity} size="lg" owned={item.owned} />
+        <NftArt category={item.category} rarity={item.rarity} size="lg" owned={item.owned} imageUrl={item.imageUrl} />
       </div>
+      {item.artistName && (
+        <p className="sheet-text" style={{ marginTop: 4, marginBottom: -4, opacity: 0.75 }}>
+          {item.artistName} · {item.albumName}
+        </p>
+      )}
       <div className="item-sheet-head">
         <h4>{item.title}</h4>
         <LikeButton liked={item.liked} likes={item.likes} onToggle={() => onToggleLike(item)} />
@@ -635,13 +782,14 @@ function ItemSheet({
         <>
           <div className="sheet-token-row">
             <span>Seu saldo</span>
-            <span className="item-sheet-balance">{formatAdla(adlaBalance)}</span>
+            <span className="item-sheet-balance">{formatUsdc(adlaBalance)}</span>
           </div>
           {item.listingMode === 'buy' ? (
             <>
+              {usdEstimate && <p className="sheet-text" style={{ marginTop: -4 }}>Estimativa em mercado real: ≈ {usdEstimate}</p>}
               {!canAfford && <p className="item-sheet-warn">Saldo insuficiente para esta compra.</p>}
               <button type="button" className="btn-primary-cta" disabled={busy || !canAfford} onClick={() => onRequestBuy(item)}>
-                {busy ? 'Confirmando…' : buyConfirming ? `Confirmar Compra · ${formatAdla(item.price)}` : <><Icon name="cart" size={16} /> Comprar por {formatAdla(item.price)}</>}
+                {busy ? 'Confirmando…' : buyConfirming ? `Confirmar Compra · ${formatUsdc(item.price)}` : <><Icon name="cart" size={16} /> Comprar por {formatUsdc(item.price)}</>}
               </button>
             </>
           ) : (
@@ -666,7 +814,7 @@ function ItemSheet({
         item.forSale ? (
           <>
             <div className="item-sheet-note note-owned">
-              <Icon name="tag" size={15} /> Listado à venda por <strong>{formatAdla(item.price)}</strong>.
+              <Icon name="tag" size={15} /> Listado à venda por <strong>{formatUsdc(item.price)}</strong>.
             </div>
             <button type="button" className="btn-ghost btn-ghost-danger" style={{ width: '100%', justifyContent: 'center', marginTop: 6 }} disabled={busy} onClick={() => onUnlist(item)}>
               {busy ? 'Removendo…' : 'Remover da Venda'}
@@ -708,7 +856,7 @@ function HomeView({
       <section className="card hero-card">
         <p className="eyebrow">SEU COFRE DE COLECIONÁVEIS</p>
         <div className="hero-row">
-          <h2 className="hero-value">{formatAdla(collectionValue)}</h2>
+          <h2 className="hero-value">{formatUsdc(collectionValue)}</h2>
         </div>
         <p className="hero-sub">Valor estimado da sua coleção · {ownedCount} {ownedCount === 1 ? 'item' : 'itens'}</p>
         <div className="action-row">
@@ -736,7 +884,7 @@ function HomeView({
           </div>
         </div>
         <div className="home-stats-grid">
-          <div className="home-stat"><span className="stat-label">Saldo</span><span className="stat-value">{formatAdla(adlaBalance)}</span></div>
+          <div className="home-stat"><span className="stat-label">Saldo</span><span className="stat-value">{formatUsdc(adlaBalance)}</span></div>
           <div className="home-stat"><span className="stat-label">À venda</span><span className="stat-value">{forSaleCount}</span></div>
           <div className="home-stat"><span className="stat-label">Ofertas recebidas</span><span className="stat-value stat-apy">{offersCount}</span></div>
         </div>
@@ -814,7 +962,7 @@ function CollectionView({ items, onOpen, onToggleLike }: { items: NftItem[]; onO
         <h3>Sua Galeria</h3>
         <div className="home-stats-grid" style={{ marginTop: 10 }}>
           <div className="home-stat"><span className="stat-label">Itens</span><span className="stat-value">{items.length}</span></div>
-          <div className="home-stat"><span className="stat-label">Valor estimado</span><span className="stat-value">{formatAdla(value)}</span></div>
+          <div className="home-stat"><span className="stat-label">Valor estimado</span><span className="stat-value">{formatUsdc(value)}</span></div>
           <div className="home-stat"><span className="stat-label">À venda</span><span className="stat-value">{items.filter(i => i.forSale).length}</span></div>
         </div>
       </section>
@@ -846,7 +994,7 @@ function WalletView({
       <section className="card hero-card">
         <p className="eyebrow">CARTEIRA</p>
         <div className="hero-row">
-          <h2 className="hero-value">{formatAdla(adlaBalance)}</h2>
+          <h2 className="hero-value">{formatUsdc(adlaBalance)}</h2>
         </div>
         <p className="hero-sub">{address ? shortAddr(address) : 'Carteira não conectada'}</p>
       </section>
@@ -873,7 +1021,7 @@ function WalletView({
                   <span className="wallet-asset-name">{i.title}</span>
                   <span className="wallet-asset-cat">{CATEGORY_SHORT[i.category]} · {i.rarity}</span>
                 </div>
-                <span className="wallet-asset-value">{i.listingMode === 'unlisted' ? '—' : formatAdla(i.price)}</span>
+                <span className="wallet-asset-value">{i.listingMode === 'unlisted' ? '—' : formatUsdc(i.price)}</span>
               </div>
             ))}
           </div>
@@ -934,7 +1082,7 @@ function ProfileView({
           <div className="home-stat"><span className="stat-label">Ofertas enviadas</span><span className="stat-value">{sentOffersCount}</span></div>
         </div>
         <div className="home-stats-grid" style={{ marginTop: 8 }}>
-          <div className="home-stat" style={{ gridColumn: '1 / -1' }}><span className="stat-label">Volume negociado</span><span className="stat-value stat-apy">{formatAdla(volume)}</span></div>
+          <div className="home-stat" style={{ gridColumn: '1 / -1' }}><span className="stat-label">Volume negociado</span><span className="stat-value stat-apy">{formatUsdc(volume)}</span></div>
         </div>
       </section>
 
@@ -969,6 +1117,9 @@ const TABS: { key: ViewKey; label: string; icon: IconName }[] = [
 
 const App: React.FC = () => {
   const provider = useAdlaProvider();
+  // Preço SOL/USD real (CoinGecko/Pyth/Birdeye, com cache) — só pra mostrar a
+  // estimativa em USD ao lado do preço em USDC. Ainda não afeta o saldo/compra.
+  const { price: solUsdPrice } = useSolanaPrice();
   const demoAutoSetRef = useRef(false);
 
   const [address, setAddress] = useState('');
@@ -982,7 +1133,9 @@ const App: React.FC = () => {
   const toastTimer = useRef<number | null>(null);
 
   const [items, setItems] = useState<NftItem[]>(() => genCatalog());
-  const [incomingOffers, setIncomingOffers] = useState<IncomingOffer[]>(() => genIncomingOffers());
+  const [incomingOffers, setIncomingOffers] = useState<IncomingOffer[]>(() =>
+    genIncomingOffers().map(o => ({ ...o, mint: items.find(i => i.id === o.itemId)?.mint ?? o.mint }))
+  );
   const [activity, setActivity] = useState<ActivityItem[]>(() => genActivity());
   const [adlaBalance, setAdlaBalance] = useState(15400);
 
@@ -1095,12 +1248,12 @@ const App: React.FC = () => {
     setBusy(true); setMsg('Confirmando compra…', 'loading');
     (async () => {
       try {
-        await callBridge(provider, demoMode, 'adla_nftBuy', [{ itemId: item.id, price: item.price }], () => {
+        await callBridge(provider, demoMode, 'adla_nftBuy', [{ mint: item.mint, price: item.price }], () => {
           setItems(prev => prev.map(i => (i.id === item.id ? { ...i, owned: true, forSale: false } : i)));
           setAdlaBalance(b => b - item.price);
           setVolume(v => v + item.price);
         });
-        pushActivity({ kind: 'buy', label: `Compra · ${item.title}`, amount: `-${item.price.toLocaleString('pt-BR')} $ADLA`, status: 'confirmed' });
+        pushActivity({ kind: 'buy', label: `Compra · ${item.title}`, amount: `-${item.price.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC`, status: 'confirmed' });
         setMsg('Compra confirmada ✓');
         closeItem();
       } catch (e: any) { setMsg(e?.message || 'Falha na compra', 'err'); }
@@ -1113,10 +1266,10 @@ const App: React.FC = () => {
     if (!amount || amount <= 0) { setMsg('Informe um valor válido', 'err'); return; }
     setBusy(true); setMsg('Enviando oferta…', 'loading');
     try {
-      await callBridge(provider, demoMode, 'adla_nftMakeOffer', [{ itemId: item.id, amount }], () => {
+      await callBridge(provider, demoMode, 'adla_nftMakeOffer', [{ mint: item.mint, amount }], () => {
         setSentOffersCount(c => c + 1);
       });
-      pushActivity({ kind: 'offer', label: `Oferta enviada · ${item.title}`, amount: `${amount.toLocaleString('pt-BR')} $ADLA`, status: 'pending' });
+      pushActivity({ kind: 'offer', label: `Oferta enviada · ${item.title}`, amount: `${amount.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC`, status: 'pending' });
       setMsg('Oferta enviada ✓');
       closeItem();
     } catch (e: any) { setMsg(e?.message || 'Falha ao enviar oferta', 'err'); }
@@ -1128,10 +1281,10 @@ const App: React.FC = () => {
     if (!price || price <= 0) { setMsg('Informe um preço válido', 'err'); return; }
     setBusy(true); setMsg('Listando item…', 'loading');
     try {
-      await callBridge(provider, demoMode, 'adla_nftList', [{ itemId: item.id, price }], () => {
+      await callBridge(provider, demoMode, 'adla_nftList', [{ mint: item.mint, price }], () => {
         setItems(prev => prev.map(i => (i.id === item.id ? { ...i, forSale: true, price } : i)));
       });
-      pushActivity({ kind: 'list', label: `Listado para venda · ${item.title}`, amount: `${price.toLocaleString('pt-BR')} $ADLA`, status: 'confirmed' });
+      pushActivity({ kind: 'list', label: `Listado para venda · ${item.title}`, amount: `${price.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC`, status: 'confirmed' });
       setMsg('Item listado para venda ✓');
       closeItem();
     } catch (e: any) { setMsg(e?.message || 'Falha ao listar item', 'err'); }
@@ -1142,7 +1295,7 @@ const App: React.FC = () => {
     if (!ensureConnected()) return;
     setBusy(true); setMsg('Removendo da venda…', 'loading');
     try {
-      await callBridge(provider, demoMode, 'adla_nftUnlist', [{ itemId: item.id }], () => {
+      await callBridge(provider, demoMode, 'adla_nftUnlist', [{ mint: item.mint }], () => {
         setItems(prev => prev.map(i => (i.id === item.id ? { ...i, forSale: false } : i)));
       });
       pushActivity({ kind: 'unlist', label: `Removido da venda · ${item.title}`, status: 'confirmed' });
@@ -1156,14 +1309,14 @@ const App: React.FC = () => {
     if (!ensureConnected()) return;
     setBusy(true); setMsg('Aceitando oferta…', 'loading');
     try {
-      await callBridge(provider, demoMode, 'adla_nftAcceptOffer', [{ offerId: offer.id }], () => {
+      await callBridge(provider, demoMode, 'adla_nftAcceptOffer', [{ mint: offer.mint, buyerAddress: offer.buyerAddress }], () => {
         setItems(prev => prev.map(i => (i.id === offer.itemId ? { ...i, owned: false, forSale: false } : i)));
         setIncomingOffers(prev => prev.filter(o => o.id !== offer.id));
         setAdlaBalance(b => b + offer.amount);
         setSoldCount(c => c + 1);
         setVolume(v => v + offer.amount);
       });
-      pushActivity({ kind: 'sell', label: `Venda aceita · ${offer.itemTitle}`, amount: `+${offer.amount.toLocaleString('pt-BR')} $ADLA`, status: 'confirmed' });
+      pushActivity({ kind: 'sell', label: `Venda aceita · ${offer.itemTitle}`, amount: `+${offer.amount.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC`, status: 'confirmed' });
       setMsg('Oferta aceita, item vendido ✓');
     } catch (e: any) { setMsg(e?.message || 'Falha ao aceitar oferta', 'err'); }
     finally { setBusy(false); }
@@ -1173,7 +1326,7 @@ const App: React.FC = () => {
     if (!ensureConnected()) return;
     setBusy(true); setMsg('Recusando oferta…', 'loading');
     try {
-      await callBridge(provider, demoMode, 'adla_nftDeclineOffer', [{ offerId: offer.id }], () => {
+      await callBridge(provider, demoMode, 'adla_nftDeclineOffer', [{ mint: offer.mint, buyerAddress: offer.buyerAddress }], () => {
         setIncomingOffers(prev => prev.filter(o => o.id !== offer.id));
       });
       pushActivity({ kind: 'decline', label: `Oferta recusada · ${offer.itemTitle}`, status: 'confirmed' });
@@ -1205,14 +1358,26 @@ const App: React.FC = () => {
     : demoMode ? 'Modo Demo' : 'Carteira não detectada';
 
   return (
+    <SolUsdContext.Provider value={solUsdPrice}>
     <div className="adla-app">
       <div className="bg-aurora" aria-hidden="true" />
 
       <div className="app-shell">
         <header className="app-header">
-          <div className="brand">
-            <span className="brand-mark">ADLA NFT</span>
-            <span className="brand-sub">FANDOM COLLECTIBLES</span>
+          <div className="brand" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            {/* Logo: coloque o arquivo em /public/logo.png (raiz do projeto Vite).
+               O Vite serve tudo que está em /public direto na raiz do site,
+               então a referência abaixo ("/logo.png") já funciona sem import. */}
+            <img
+              src="/logo.png"
+              alt="ADLA NFT Market"
+              className="brand-logo"
+              style={{ width: 32, height: 32, borderRadius: 8, objectFit: 'cover' }}
+            />
+            <div className="brand-text" style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.1 }}>
+              <span className="brand-mark">ADLA NFT</span>
+              <span className="brand-sub">FANDOM COLLECTIBLES</span>
+            </div>
           </div>
           <WalletButton
             hasProvider={!!provider}
@@ -1354,6 +1519,7 @@ const App: React.FC = () => {
         }}
       />
     </div>
+    </SolUsdContext.Provider>
   );
 };
 
