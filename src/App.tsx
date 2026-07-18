@@ -6,6 +6,10 @@ import { useSolanaPrice } from './useTensorMarket';
 // Preço agora vem em menor unidade de USDC (6 casas), via TensorTradeAdapter.rawToDecimal.
 // Ajuste o caminho abaixo conforme onde você colocar TensorTradeAdapter.ts no seu projeto.
 import { TensorTradeAdapter } from './TensorTradeAdapter';
+// Logo importado como módulo: o Vite resolve o caminho final certo em build,
+// respeitando o `base` (mesmo './') e sem depender da URL atual do navegador.
+// Coloque o arquivo em src/assets/logo.png (veja instrução completa mais abaixo, no header).
+import logoUrl from './assets/logo.png';
 
 /* ============================================================================
    ADLA NFT MARKET — Colecionáveis do Fandom
@@ -23,8 +27,8 @@ import { TensorTradeAdapter } from './TensorTradeAdapter';
    Solana — `mint` é o endereço do NFT (chave da conta Mint), obrigatório em
    toda chamada pra o bridge derivar as PDAs (`listing`, `vault`, `offer`,
    `escrow`) do lado nativo:
-     - adla_requestAccounts   → string[]
-     - adla_accounts          → string[]
+     - sol_requestAccounts    → string[]
+     - sol_accounts           → string[]
      - adla_nftBuy            { mint, price }                    → { txId }
      - adla_nftMakeOffer      { mint, amount }                   → { txId }
      - adla_nftList           { mint, price }                    → { txId }
@@ -40,7 +44,7 @@ import { TensorTradeAdapter } from './TensorTradeAdapter';
 // ---------------------------------------------------------------------------
 
 type AdlaMethod =
-  | 'adla_requestAccounts' | 'adla_accounts'
+  | 'sol_requestAccounts' | 'sol_accounts'
   | 'adla_nftBuy' | 'adla_nftMakeOffer'
   | 'adla_nftList' | 'adla_nftUnlist'
   | 'adla_nftAcceptOffer' | 'adla_nftDeclineOffer';
@@ -1175,7 +1179,7 @@ const App: React.FC = () => {
     const onDisconnectEvt = () => setAddress('');
     provider.on('accountsChanged', onAccounts);
     provider.on('disconnect', onDisconnectEvt);
-    provider.request<string[]>({ method: 'adla_accounts' }).then(accs => { if (accs?.[0]) setAddress(accs[0]); }).catch(() => {});
+    provider.request<string[]>({ method: 'sol_accounts' }).then(accs => { if (accs?.[0]) setAddress(accs[0]); }).catch(() => {});
     return () => {
       provider.removeListener('accountsChanged', onAccounts);
       provider.removeListener('disconnect', onDisconnectEvt);
@@ -1199,7 +1203,7 @@ const App: React.FC = () => {
     setConnecting(true);
     setMsg('Aguardando aprovação na carteira…', 'loading');
     try {
-      const accounts = await provider.request<string[]>({ method: 'adla_requestAccounts' });
+      const accounts = await provider.request<string[]>({ method: 'sol_requestAccounts' });
       setAddress(accounts?.[0] ?? '');
       setMsg('Carteira conectada ✓');
     } catch (e: any) {
@@ -1365,11 +1369,13 @@ const App: React.FC = () => {
       <div className="app-shell">
         <header className="app-header">
           <div className="brand" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            {/* Logo: coloque o arquivo em /public/logo.png (raiz do projeto Vite).
-               O Vite serve tudo que está em /public direto na raiz do site,
-               então a referência abaixo ("/logo.png") já funciona sem import. */}
+            {/* Logo: coloque o arquivo em src/assets/logo.png.
+               Importar como módulo (linha do import lá em cima) é mais seguro que usar
+               um caminho tipo "/logo.png" ou "./logo.png": o Vite gera a URL final certa
+               em build, considerando o `base` do vite.config.ts — não depende da URL
+               atual do navegador nem quebra se o app navegar pra outra "página". */}
             <img
-              src="/logo.png"
+              src={logoUrl}
               alt="ADLA NFT Market"
               className="brand-logo"
               style={{ width: 32, height: 32, borderRadius: 8, objectFit: 'cover' }}
